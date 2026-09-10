@@ -18,6 +18,7 @@ import { NewCustomerModal } from "../components/billing/NewCustomerModal";
 import { ProductTable } from "../components/billing/ProductTable";
 import { InvoicePreviewA4 } from "../components/billing/InvoicePreviewA4";
 import { InvoicePreviewThermal } from "../components/billing/InvoicePreviewThermal";
+import { fetchApi } from "../../lib/api";
 
 function newItem(): InvoiceItem {
   return { id: crypto.randomUUID(), description: "", hsn: "", qty: 1, unit: "pcs", rate: 0, gstRate: 18 };
@@ -70,13 +71,95 @@ export function Billing() {
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(100);
 
-  // ── Init ───────────────────────────────────────────────────────────────
+  // ── Init & Backend Sync ───────────────────────────────────────────────
+  const [isOffline, setIsOffline] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const loadNextNumber = async () => {
+    try {
+      const res = await fetchApi("/invoices/next-number");
+      if (res?.next_invoice_number) {
+        setDetails(d => ({ ...d, invoiceNo: res.next_invoice_number }));
+      }
+    } catch {
+      setDetails(d => ({ ...d, invoiceNo: d.invoiceNo || nextInvoiceNo() }));
+    }
+  };
+
   useEffect(() => {
-    setDetails(d => ({ ...d, invoiceNo: nextInvoiceNo() }));
-    const c: Customer[] = JSON.parse(localStorage.getItem("customers") || "[]");
-    const p: Product[] = JSON.parse(localStorage.getItem("products") || "[]");
-    setCustomers(c);
-    setProducts(p);
+    loadNextNumber();
+    const isMigrated = localStorage.getItem("shopmanager_migrated") === "true";
+
+    // Fetch live customers with fallback
+    fetchApi("/customers?per_page=100")
+      .then(res => {
+        if (res?.items) {
+          const apiCusts: Customer[] = res.items.map((item: any) => ({
+            id: item.id,
+            name: item.name,
+            phone: item.phone,
+            email: item.email || undefined,
+            address: item.address,
+            city: item.city || undefined,
+            state: item.state,
+            stateCode: item.state_code,
+            pincode: item.pincode || undefined,
+            gstin: item.gstin,
+          }));
+          setCustomers(apiCusts);
+          setIsOffline(false);
+        }
+      })
+      .catch(() => {
+        if (!isMigrated) {
+          const c: Customer[] = JSON.parse(localStorage.getItem("customers") || "[]");
+          setCustomers(c);
+        }
+        setIsOffline(true);
+      });
+
+    // Fetch live products with fallback
+    fetchApi("/products?per_page=100")
+      .then(res => {
+        if (res?.items) {
+          const apiProds: Product[] = res.items.map((item: any) => ({
+            id: item.id,
+            name: item.name,
+            hsn: item.hsn,
+            price: item.price,
+            stock: item.stock,
+            unit: item.unit || "pcs",
+            gstRate: item.gst_rate ?? 18,
+          }));
+          setProducts(apiProds);
+        }
+      })
+      .catch(() => {
+        if (!isMigrated) {
+          const p: Product[] = JSON.parse(localStorage.getItem("products") || "[]");
+          setProducts(p);
+        }
+        setIsOffline(true);
+      });
+
+    // Restore draft if saved
+    const savedDraft = localStorage.getItem("shopmanager_billing_draft");
+    if (savedDraft) {
+      try {
+        const draft = JSON.parse(savedDraft);
+        if (draft.outputMode) setOutputMode(draft.outputMode);
+        if (draft.customerMode) setCustomerMode(draft.customerMode);
+        if (draft.selectedCustomer) setSelectedCustomer(draft.selectedCustomer);
+        if (draft.walkinName) setWalkinName(draft.walkinName);
+        if (draft.walkinPhone) setWalkinPhone(draft.walkinPhone);
+        if (draft.items && draft.items.length > 0) setItems(draft.items);
+        if (draft.paymentMethod) setPaymentMethod(draft.paymentMethod);
+        if (draft.details) setDetails(d => ({ ...d, ...draft.details }));
+        toast.info("Restored in-progress billing draft");
+      } catch (e) {
+        console.warn("Failed to load draft:", e);
+      }
+    }
   }, []);
 
   // Close customer dropdown on outside click
@@ -147,9 +230,9 @@ export function Billing() {
   const totals = computeInvoiceTotals(items);
   const filteredCustomers = customers.filter(
     c =>
-      c.name.toLowerCase().includes(customerSearch.toLowerCase()) ||
-      c.phone.includes(customerSearch) ||
-      c.gstin.toLowerCase().includes(customerSearch.toLowerCase())
+      (c.name ?? "").toLowerCase().includes(customerSearch.toLowerCase()) ||
+      (c.phone ?? "").includes(customerSearch) ||
+      (c.gstin ?? "").toLowerCase().includes(customerSearch.toLowerCase())
   );
 
   // ── Handlers ───────────────────────────────────────────────────────────
@@ -185,7 +268,9 @@ export function Billing() {
     setWalkinPhone("");
     setItems([newItem()]);
     setPaymentMethod("cash");
-    setDetails(d => ({ ...d, invoiceNo: nextInvoiceNo(), invoiceDate: todayDate(), placeOfSupply: "", supplyDateTime: "", transportMode: "", vehicleNumber: "" }));
+    setDetails(d => ({ ...d, invoiceDate: todayDate(), placeOfSupply: "", supplyDateTime: "", transportMode: "", vehicleNumber: "" }));
+    localStorage.removeItem("shopmanager_billing_draft");
+    loadNextNumber();
     toast.info("Invoice cleared");
   };
 
@@ -196,24 +281,77 @@ export function Billing() {
     return true;
   };
 
-  const handleSaveDraft = () => toast.info("Draft saved (prototype — no persistence yet)");
-
-  const handleSaveInvoice = () => {
-    if (!validate()) return;
-    const invoices = JSON.parse(localStorage.getItem("invoices") || "[]");
-    invoices.push({
-      id: details.invoiceNo,
-      date: details.invoiceDate,
-      customer: customerMode === "walkin" ? { name: walkinName, phone: walkinPhone } : selectedCustomer,
-      items,
-      ...totals,
-      paymentMethod,
+  const handleSaveDraft = () => {
+    const hasItems = items.some(i => i.description.trim() || i.rate > 0);
+    const hasCustomer = customerMode === "walkin" ? !!walkinName.trim() : !!selectedCustomer;
+    if (!hasItems && !hasCustomer) {
+      toast.error("Add at least an item or customer before saving draft");
+      return;
+    }
+    const draft = {
       outputMode,
-      status: "Paid",
-    });
-    localStorage.setItem("invoices", JSON.stringify(invoices));
-    toast.success(`Invoice ${details.invoiceNo} saved`);
-    handleClear();
+      customerMode,
+      selectedCustomer,
+      walkinName,
+      walkinPhone,
+      items,
+      paymentMethod,
+      details,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem("shopmanager_billing_draft", JSON.stringify(draft));
+    toast.success("Draft saved successfully");
+  };
+
+  const handleSaveInvoice = async () => {
+    if (!validate()) return;
+    setIsSaving(true);
+    try {
+      const isUuid = (id?: string) => !!id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+      const payload = {
+        invoice_date: details.invoiceDate || todayDate(),
+        status: "Paid",
+        customer_id: customerMode === "existing" && isUuid(selectedCustomer?.id) ? selectedCustomer!.id : null,
+        customer_name: customerMode === "walkin" ? walkinName : (selectedCustomer?.name || "Walk-In"),
+        customer_phone: customerMode === "walkin" ? (walkinPhone || null) : (selectedCustomer?.phone || null),
+        customer_address: customerMode === "existing" ? (selectedCustomer?.address || null) : null,
+        customer_gstin: customerMode === "existing" ? (selectedCustomer?.gstin || null) : null,
+        customer_state: customerMode === "existing" ? (selectedCustomer?.state || null) : null,
+        customer_state_code: customerMode === "existing" ? (selectedCustomer?.stateCode || null) : null,
+        subtotal: totals.totalTaxable,
+        cgst: totals.totalCGST,
+        sgst: totals.totalSGST,
+        igst: 0,
+        total: totals.grandTotal,
+        payment_method: paymentMethod,
+        items: items.map(item => ({
+          product_id: isUuid(item.productId) ? item.productId : null,
+          description: item.description,
+          hsn: item.hsn || "0000",
+          qty: item.qty,
+          unit: item.unit || "pcs",
+          rate: item.rate,
+          gst_rate: item.gstRate ?? 18,
+        })),
+      };
+
+      const res = await fetchApi("/invoices", {
+        method: "POST",
+        body: payload,
+      });
+
+      const definitiveNo = res?.invoice_no || details.invoiceNo;
+
+      localStorage.removeItem("shopmanager_billing_draft");
+
+      toast.success(`Invoice ${definitiveNo} saved successfully`);
+      handleClear();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save invoice");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handlePrint = () => {
@@ -248,6 +386,9 @@ export function Billing() {
         <span className="ml-auto text-xs text-slate-400">
           {outputMode === "a4" ? "Full GST invoice for business customers" : "80mm thermal receipt for walk-in customers"}
         </span>
+        {isOffline && (
+          <span className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">Offline Mode – Showing Cached Data</span>
+        )}
       </div>
 
       {/* ── Main Split Area ─────────────────────────────────────────────── */}

@@ -26,9 +26,13 @@ Notes:
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -39,7 +43,9 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # The backend is usually launched from the repository root, so use an
+        # absolute path instead of relying on the process working directory.
+        env_file=BACKEND_DIR / ".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
@@ -68,6 +74,22 @@ class Settings(BaseSettings):
 
     # ── Invoice Numbering ────────────────────────────────────────────────────
     INVOICE_PREFIX: str = "INV"
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def normalize_debug(cls, value: bool | str) -> bool | str:
+        """Tolerate common build-mode environment values on Windows.
+
+        Some developer shells set DEBUG=release, which otherwise overrides
+        backend/.env and prevents the API from even importing.
+        """
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "production"}:
+                return False
+            if normalized in {"debug", "development"}:
+                return True
+        return value
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

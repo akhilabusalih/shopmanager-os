@@ -2,7 +2,7 @@
 ShopManager OS — Invoice Service
 """
 
-from typing import Sequence
+from typing import Any, Sequence
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,27 @@ class InvoiceService:
 
     async def create_invoice(self, data: InvoiceCreate) -> Invoice:
         from backend.modules.inventory.models import InventoryLog
+        from backend.shared.exceptions.app_exceptions import InsufficientStockException
+
+        # 0. Validate stock for all linked products to prevent negative stock
+        product_quantities: dict[UUID, int] = {}
+        for item_data in data.items:
+            if item_data.product_id:
+                product_quantities[item_data.product_id] = (
+                    product_quantities.get(item_data.product_id, 0) + item_data.qty
+                )
+
+        cached_products: dict[UUID, Any] = {}
+        for pid, requested_qty in product_quantities.items():
+            product = await self.product_repository.get_by_id(pid)
+            if product:
+                cached_products[pid] = product
+                if product.stock < requested_qty:
+                    raise InsufficientStockException(
+                        product_name=product.name,
+                        requested=requested_qty,
+                        available=product.stock,
+                    )
 
         # 1. Generate new invoice number
         invoice_no = await self.numbering_service.generate_next_invoice_number()
@@ -69,7 +90,7 @@ class InvoiceService:
 
             # Update product stock if a product is linked
             if item.product_id:
-                product = await self.product_repository.get_by_id(item.product_id)
+                product = cached_products.get(item.product_id) or await self.product_repository.get_by_id(item.product_id)
                 if product:
                     qty_before = product.stock
                     product.stock -= item.qty
@@ -124,13 +145,18 @@ class InvoiceService:
         )
 
     async def get_next_invoice_number(self) -> str:
-        # We preview the next number without committing the sequence increment
-        # In a high-concurrency environment, this might skip, but it's fine for preview
-        # We will use the settings repository directly or write a preview method
-        prefix = "INV" # Hardcoded for now, but could be dynamic
+        # Non-reserving preview honoring settings prefix
+        prefix = "INV"
+        try:
+            settings_val = await self.settings_repository.get_settings()
+            if settings_val and isinstance(settings_val, dict):
+                prefix = settings_val.get("invoice", {}).get("prefix", "INV") or "INV"
+        except Exception:
+            pass
+
         import datetime
         from sqlalchemy import select
-        from backend.shared.utils.invoice_numbering import InvoiceSequence
+        from backend.modules.invoices.models import InvoiceSequence
         
         current_year = datetime.datetime.now().year
         stmt = select(InvoiceSequence).where(

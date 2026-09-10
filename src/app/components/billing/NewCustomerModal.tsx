@@ -2,6 +2,7 @@ import { useState } from "react";
 import { X, User, Phone, Mail, MapPin, Hash, Building2 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
+import { fetchApi } from "../../../lib/api";
 import type { Customer } from "./billingTypes";
 
 interface NewCustomerModalProps {
@@ -21,12 +22,11 @@ export function NewCustomerModal({ isOpen, onClose, onCreated }: NewCustomerModa
 
   const set = (k: keyof typeof EMPTY, v: string) => setForm(f => ({ ...f, [k]: v }));
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.name.trim()) { toast.error("Customer name is required"); return; }
     if (!form.phone.trim()) { toast.error("Phone number is required"); return; }
     setSaving(true);
 
-    const stored: Customer[] = JSON.parse(localStorage.getItem("customers") || "[]");
     const customer: Customer = {
       id: `CUST-${Date.now()}`,
       name: form.name.trim(),
@@ -40,13 +40,35 @@ export function NewCustomerModal({ isOpen, onClose, onCreated }: NewCustomerModa
       pincode: form.pincode.trim() || undefined,
     };
 
-    stored.push(customer);
-    localStorage.setItem("customers", JSON.stringify(stored));
-    toast.success(`Customer "${customer.name}" created`);
-    onCreated(customer);
-    setForm({ ...EMPTY });
-    setSaving(false);
-    onClose();
+    try {
+      const saved = await fetchApi("/customers", {
+        method: "POST",
+        body: {
+          name: customer.name, phone: customer.phone, email: customer.email || null,
+          gstin: customer.gstin || null, address: customer.address || "", city: customer.city || null,
+          state: customer.state || "Kerala", state_code: customer.stateCode || "32", pincode: customer.pincode || null,
+        },
+      });
+      const apiCustomer = { ...customer, id: saved.id, stateCode: saved.state_code, gstin: saved.gstin };
+      toast.success(`Customer "${customer.name}" created`);
+      onCreated(apiCustomer);
+      setForm({ ...EMPTY });
+      onClose();
+    } catch (error: any) {
+      if (localStorage.getItem("shopmanager_migrated") === "true") {
+        toast.error(error.message || "Unable to create customer while offline");
+      } else {
+        const stored: Customer[] = JSON.parse(localStorage.getItem("customers") || "[]");
+        stored.push(customer);
+        localStorage.setItem("customers", JSON.stringify(stored));
+        toast.info("Offline Mode – Customer saved locally until migration");
+        onCreated(customer);
+        setForm({ ...EMPTY });
+        onClose();
+      }
+    } finally {
+      setSaving(false);
+    }
   };
 
   const fields = [

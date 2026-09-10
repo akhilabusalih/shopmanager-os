@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
+import { fetchApi } from "../../lib/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -316,15 +317,21 @@ export function Settings() {
   const [settings, setSettings] = useState<SettingsData>({ ...DEFAULT });
   const [hasChanges, setHasChanges] = useState(false);
   const [showPasswordFields, setShowPasswordFields] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [systemInfo, setSystemInfo] = useState({ customers: 0, products: 0, invoices: 0, storageKB: 0 });
+  const restoreInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const stored = localStorage.getItem("shopmanager_settings");
-    if (stored) {
-      try { setSettings(s => ({ ...DEFAULT, ...JSON.parse(stored) })); } catch {}
-    }
+    fetchApi("/settings").then(response => {
+      if (response?.settings) setSettings(s => ({ ...DEFAULT, ...response.settings }));
+    }).catch(() => {
+      if (localStorage.getItem("shopmanager_migrated") !== "true") {
+        const stored = localStorage.getItem("shopmanager_settings");
+        if (stored) try { setSettings(s => ({ ...DEFAULT, ...JSON.parse(stored) })); } catch {}
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -351,10 +358,18 @@ export function Settings() {
 
   const SETTINGS_SECTIONS = ["shop", "gst", "invoice", "print", "customerDefaults", "productDefaults", "branding", "security"];
 
-  const save = () => {
-    localStorage.setItem("shopmanager_settings", JSON.stringify(settings));
-    setHasChanges(false);
-    toast.success("Settings saved");
+  const save = async () => {
+    try {
+      await fetchApi("/settings", { method: "PUT", body: { settings } });
+      setHasChanges(false);
+      toast.success("Settings saved");
+    } catch (error: any) {
+      if (localStorage.getItem("shopmanager_migrated") !== "true") {
+        localStorage.setItem("shopmanager_settings", JSON.stringify(settings));
+        setHasChanges(false);
+        toast.info("Offline Mode – Settings saved locally until migration");
+      } else toast.error(error.message || "Unable to save settings");
+    }
   };
 
   // ── Data management actions ───────────────────────────────────────────────
@@ -374,14 +389,27 @@ export function Settings() {
     toast.success(`Exported ${rows.length} records`);
   };
 
-  const createBackup = () => {
-    const backup: Record<string, any> = {};
-    ["customers", "products", "invoices", "shopmanager_settings", "shopmanager_shop_data"].forEach(k => {
-      const v = localStorage.getItem(k);
-      if (v) backup[k] = JSON.parse(v);
-    });
-    downloadJSON(backup, `shopmanager-backup-${new Date().toISOString().split("T")[0]}.json`);
-    toast.success("Backup created and downloaded");
+  const createBackup = async () => {
+    try {
+      const token = localStorage.getItem("shopmanager_token");
+      const response = await fetch("/api/backup/export", { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!response.ok) throw new Error("Backup export failed");
+      const blob = await response.blob();
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+      a.download = `shopmanager-backup-${new Date().toISOString().split("T")[0]}.json`; a.click();
+      toast.success("Backup created and downloaded");
+    } catch (error: any) { toast.error(error.message || "Unable to create backup"); }
+  };
+
+  const restoreBackup = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const form = new FormData(); form.append("file", file);
+      await fetchApi("/backup/import", { method: "POST", body: form });
+      toast.success("Database restored successfully");
+    } catch (error: any) { toast.error(error.message || "Unable to restore backup"); }
+    event.target.value = "";
   };
 
   const clearData = (key: string, label: string) => {
@@ -390,12 +418,33 @@ export function Settings() {
     toast.success(`${label} cleared`);
   };
 
-  const changePassword = () => {
+  const changePassword = async () => {
+    if (!currentPassword) { toast.error("Current password is required"); return; }
     if (!newPassword) { toast.error("New password cannot be empty"); return; }
     if (newPassword !== confirmPassword) { toast.error("Passwords do not match"); return; }
-    toast.success("Password updated");
-    setNewPassword(""); setConfirmPassword("");
-    setShowPasswordFields(false);
+    try {
+      await fetchApi("/auth/change-password", { method: "POST", body: { current_password: currentPassword, new_password: newPassword } });
+      toast.success("Password updated");
+      setCurrentPassword(""); setNewPassword(""); setConfirmPassword(""); setShowPasswordFields(false);
+    } catch (error: any) { toast.error(error.message || "Unable to change password"); }
+  };
+
+  const migrateLocalData = async () => {
+    try {
+      const customers = JSON.parse(localStorage.getItem("customers") || "[]");
+      const products = JSON.parse(localStorage.getItem("products") || "[]");
+      const invoices = JSON.parse(localStorage.getItem("invoices") || "[]");
+      const legacySettings = JSON.parse(localStorage.getItem("shopmanager_settings") || "{}");
+      const payload = {
+        settings: { business_name: legacySettings.shop?.businessName, address: legacySettings.shop?.address, phone: legacySettings.shop?.phone, email: legacySettings.shop?.email, gstin: legacySettings.gst?.gstin, invoice_prefix: legacySettings.invoice?.prefix, default_gst_rate: legacySettings.productDefaults?.defaultGSTRate },
+        customers: customers.map((c: any) => ({ ...c, state_code: c.state_code || c.stateCode })),
+        products: products.map((p: any) => ({ ...p, gst_rate: p.gst_rate ?? p.gstRate })),
+        invoices: invoices.map((i: any) => ({ id: String(i.id), invoice_no: i.invoice_no || i.invoiceNo || String(i.id), invoice_date: i.invoice_date || i.date || new Date().toISOString().slice(0, 10), status: i.status || "Paid", customer_id: i.customer_id || i.customer?.id, customer_name: i.customer_name || i.customer?.name || i.customerName || "Walk-In", customer_phone: i.customer_phone || i.customer?.phone, customer_address: i.customer_address || i.customer?.address, customer_gstin: i.customer_gstin || i.customer?.gstin, customer_state: i.customer_state || i.customer?.state, customer_state_code: i.customer_state_code || i.customer?.stateCode, subtotal: i.subtotal || i.totalTaxable || 0, cgst: i.cgst || i.totalCGST || 0, sgst: i.sgst || i.totalSGST || 0, igst: i.igst || 0, total: i.total || i.grandTotal || 0, payment_method: i.payment_method || i.paymentMethod, items: (i.items || []).map((item: any) => ({ product_id: item.product_id || item.productId, description: item.description, hsn: item.hsn || "0000", qty: item.qty, unit: item.unit || "pcs", rate: item.rate || 0, gst_rate: item.gst_rate ?? item.gstRate ?? 0 })) })),
+      };
+      const report = await fetchApi("/migrate/import-localstorage", { method: "POST", body: payload });
+      localStorage.setItem("shopmanager_migrated", "true");
+      toast.success(`Migration complete: ${report.customers_imported} customers, ${report.products_imported} products, ${report.invoices_imported} invoices`);
+    } catch (error: any) { toast.error(error.message || "Migration failed; local data has not been changed"); }
   };
 
   // ── Current section title for header ─────────────────────────────────────
@@ -769,6 +818,8 @@ export function Settings() {
               <p className="text-xs text-slate-500 mb-3">Create a full backup of all your data including customers, products, invoices, and settings.</p>
               <div className="flex gap-3">
                 <ActionBtn onClick={createBackup} icon={Download} label="Create Backup" variant="primary" />
+                <ActionBtn onClick={() => restoreInputRef.current?.click()} icon={Upload} label="Restore Database" />
+                <input ref={restoreInputRef} type="file" accept="application/json,.json" onChange={restoreBackup} className="hidden" />
                 <ActionBtn onClick={() => toast.info("Restore backup — select a .json file")} icon={Upload} label="Restore Backup" />
               </div>
             </CardBlock>
@@ -776,11 +827,18 @@ export function Settings() {
             <CardBlock title="Export Data">
               <p className="text-xs text-slate-500 mb-3">Export individual data sets as CSV files for use in spreadsheets.</p>
               <div className="flex flex-wrap gap-2">
-                <ActionBtn onClick={() => downloadCSV(JSON.parse(localStorage.getItem("customers") || "[]"), "customers.csv")} icon={Users} label="Export Customers" />
-                <ActionBtn onClick={() => downloadCSV(JSON.parse(localStorage.getItem("products") || "[]"), "products.csv")} icon={Package} label="Export Products" />
-                <ActionBtn onClick={() => downloadCSV(JSON.parse(localStorage.getItem("invoices") || "[]"), "invoices.csv")} icon={FileText} label="Export Invoices" />
+                <ActionBtn onClick={() => downloadCSV(JSON.parse(localStorage.getItem("customers") || "[]"), "customers.csv")} icon={Users} label="Export Customers" disabled={localStorage.getItem("shopmanager_migrated") === "true"} />
+                <ActionBtn onClick={() => downloadCSV(JSON.parse(localStorage.getItem("products") || "[]"), "products.csv")} icon={Package} label="Export Products" disabled={localStorage.getItem("shopmanager_migrated") === "true"} />
+                <ActionBtn onClick={() => downloadCSV(JSON.parse(localStorage.getItem("invoices") || "[]"), "invoices.csv")} icon={FileText} label="Export Invoices" disabled={localStorage.getItem("shopmanager_migrated") === "true"} />
               </div>
             </CardBlock>
+
+            {localStorage.getItem("shopmanager_migrated") !== "true" && (
+              <CardBlock title="Migrate Local Data">
+                <p className="text-xs text-slate-500 mb-3">Safely import this browser&apos;s existing customers, products, invoices, and settings into the database. Local data remains available until this succeeds.</p>
+                <ActionBtn onClick={migrateLocalData} icon={Database} label="Migrate Local Data" variant="primary" />
+              </CardBlock>
+            )}
 
             <DangerBlock title="Danger Zone">
               <p className="text-xs text-red-700 mb-3">These actions permanently delete data and cannot be undone. Create a backup before proceeding.</p>
@@ -835,6 +893,7 @@ export function Settings() {
                     >
                       <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Change Password</p>
                       {[
+                        { label: "Current Password", value: currentPassword, set: setCurrentPassword },
                         { label: "New Password", value: newPassword, set: setNewPassword },
                         { label: "Confirm Password", value: confirmPassword, set: setConfirmPassword },
                       ].map(({ label, value, set }) => (
@@ -853,7 +912,7 @@ export function Settings() {
                         <button onClick={changePassword} className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">
                           Update Password
                         </button>
-                        <button onClick={() => { setShowPasswordFields(false); setNewPassword(""); setConfirmPassword(""); }} className="px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">
+                        <button onClick={() => { setShowPasswordFields(false); setCurrentPassword(""); setNewPassword(""); setConfirmPassword(""); }} className="px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">
                           Cancel
                         </button>
                       </div>

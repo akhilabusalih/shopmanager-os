@@ -135,3 +135,12 @@ webauthn
 websockets
 Werkzeug
 graphifyy
+sqlalchemy
+alembic
+asyncpg
+psycopg2-binary
+pydantic-settings
+pytest
+pytest-asyncio
+greenlet
+Mako

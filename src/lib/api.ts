@@ -39,7 +39,7 @@ export async function fetchApi(endpoint: string, options: RequestInit = {}) {
     let errorMessage = "An error occurred";
     try {
       errorData = await response.json();
-      errorMessage = errorData.detail || errorData.message || errorMessage;
+      errorMessage = errorData.error || errorData.detail || errorData.message || errorMessage;
     } catch {
       errorMessage = await response.text();
     }

@@ -77,6 +77,9 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
+# Backward-compatibility alias for lifespan seeding
+async_session_maker = AsyncSessionLocal
+
 
 # -----------------------------------------------------------------------------
 # FastAPI Dependency
@@ -124,6 +127,11 @@ async def create_tables() -> None:
     from backend.shared.database.base import Base  # noqa: F401
     import backend.modules.auth.models  # noqa: F401
     import backend.modules.settings.models  # noqa: F401
+    import backend.modules.customers.models  # noqa: F401
+    import backend.modules.products.models  # noqa: F401
+    import backend.modules.invoices.models  # noqa: F401
+    import backend.modules.inventory.models  # noqa: F401
+    import backend.modules.templates.models  # noqa: F401
 
     try:
         async with engine.begin() as conn:

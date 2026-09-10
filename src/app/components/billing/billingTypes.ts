@@ -7,12 +7,12 @@ export interface Customer {
   name: string;
   phone: string;
   email?: string;
-  address: string;
+  address?: string;
   city?: string;
-  state: string;
-  stateCode: string;
+  state?: string;
+  stateCode?: string;
   pincode?: string;
-  gstin: string;
+  gstin?: string | null;
 }
 
 export interface Product {

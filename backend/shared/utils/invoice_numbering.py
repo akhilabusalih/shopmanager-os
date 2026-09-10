@@ -42,6 +42,7 @@ Notes:
 
 import logging
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +57,24 @@ class InvoiceNumberingService:
     This service is called ONLY inside invoice creation transactions.
     It must NEVER be called outside of a transaction.
     """
+
+    def __init__(self, session: AsyncSession, settings_repo: Any = None):
+        self.session = session
+        self.settings_repo = settings_repo
+
+    async def generate_next_invoice_number(self) -> str:
+        """
+        Generates next sequential number honoring prefix from Settings.
+        """
+        prefix = "INV"
+        if self.settings_repo:
+            try:
+                settings_val = await self.settings_repo.get_settings()
+                if settings_val and isinstance(settings_val, dict):
+                    prefix = settings_val.get("invoice", {}).get("prefix", "INV") or "INV"
+            except Exception as e:
+                logger.warning(f"Could not load invoice prefix from settings: {e}")
+        return await self.get_next_number(self.session, prefix=prefix)
 
     @staticmethod
     async def get_next_number(

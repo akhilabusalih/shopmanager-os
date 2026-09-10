@@ -6,6 +6,7 @@ import {
   FileSpreadsheet, CheckSquare, Square, Calendar, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
+import { fetchApi } from "../../lib/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -722,11 +723,21 @@ export function Reports() {
   const [invoices, setInvoices] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
+  const [isOffline, setIsOffline] = useState(false);
 
-  const load = () => {
-    setInvoices(JSON.parse(localStorage.getItem("invoices") || "[]"));
-    setCustomers(JSON.parse(localStorage.getItem("customers") || "[]"));
-    setProducts(JSON.parse(localStorage.getItem("products") || "[]"));
+  const load = async () => {
+    try {
+      const [invoicePage, customerPage, productPage] = await Promise.all([fetchApi("/invoices?per_page=100"), fetchApi("/customers?per_page=100"), fetchApi("/products?per_page=100")]);
+      setInvoices((invoicePage.items || []).map((invoice: any) => ({ ...invoice, invoiceNo: invoice.invoice_no, date: invoice.invoice_date, customerName: invoice.customer_name, customer: { name: invoice.customer_name }, totalTaxable: invoice.subtotal, totalCGST: invoice.cgst, totalSGST: invoice.sgst, grandTotal: invoice.total, createdAt: invoice.created_at })));
+      setCustomers((customerPage.items || []).map((customer: any) => ({ ...customer, stateCode: customer.state_code })));
+      setProducts((productPage.items || []).map((product: any) => ({ ...product, gstRate: product.gst_rate })));
+      setIsOffline(false);
+    } catch {
+      if (localStorage.getItem("shopmanager_migrated") !== "true") {
+        setInvoices(JSON.parse(localStorage.getItem("invoices") || "[]")); setCustomers(JSON.parse(localStorage.getItem("customers") || "[]")); setProducts(JSON.parse(localStorage.getItem("products") || "[]"));
+        setIsOffline(true);
+      }
+    }
   };
 
   useEffect(() => { load(); }, []);
@@ -748,6 +759,7 @@ export function Reports() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-slate-50">
+      {isOffline && <div className="px-6 py-2 text-xs font-semibold text-amber-700 bg-amber-50 border-b border-amber-200">Offline Mode – Showing Cached Data</div>}
 
       {/* ── Header ── */}
       <div className="flex items-center gap-3 px-6 py-3.5 bg-white border-b border-slate-200 flex-shrink-0">

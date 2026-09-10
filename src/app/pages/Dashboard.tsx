@@ -21,6 +21,7 @@ import {
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { PowerDialog } from "../components/PowerDialog";
+import { fetchApi } from "../../lib/api";
 
 type RecentInvoice = {
   id: string;
@@ -111,17 +112,10 @@ export function Dashboard() {
   const [stats, setStats] = useState<QuickStat[]>([]);
   const [lowStockCount, setLowStockCount] = useState(0);
   const [showPower, setShowPower] = useState(false);
-
-  const shopData = (() => {
-    try {
-      const raw = localStorage.getItem("shopmanager_shop_data") || localStorage.getItem("shopmanager_settings");
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
-    }
-  })();
-  const shopName = shopData.shopName || "ShopManager OS";
-  const ownerName = shopData.ownerName || "Administrator";
+  const [shopData, setShopData] = useState<any>({});
+  const [isOffline, setIsOffline] = useState(false);
+  const shopName = shopData.shop?.businessName || shopData.shopName || "ShopManager OS";
+  const ownerName = shopData.shop?.ownerName || shopData.ownerName || "Administrator";
 
   // Tick clock every minute
   useEffect(() => {
@@ -130,9 +124,8 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
-    const invoices: any[] = JSON.parse(localStorage.getItem("invoices") || "[]");
-    const products: any[] = JSON.parse(localStorage.getItem("products") || "[]");
-    const customers: any[] = JSON.parse(localStorage.getItem("customers") || "[]");
+    const useLegacyFallback = localStorage.getItem("shopmanager_migrated") !== "true";
+    const applyData = (invoices: any[], products: any[], customers: any[]) => {
 
     // Recent invoices — last 8, newest first
     const recent = invoices
@@ -141,10 +134,10 @@ export function Dashboard() {
       .slice(0, 8)
       .map((inv) => ({
         id: inv.id,
-        invoiceNo: inv.invoiceNo || inv.id,
-        customer: inv.customer?.name || inv.customerName || "Walk-In",
-        date: inv.date || inv.createdAt || "",
-        amount: inv.grandTotal || inv.total || 0,
+        invoiceNo: inv.invoice_no || inv.invoiceNo || inv.id,
+        customer: inv.customer_name || inv.customer?.name || inv.customerName || "Walk-In",
+        date: inv.invoice_date || inv.date || inv.created_at || inv.createdAt || "",
+        amount: inv.total || inv.grandTotal || 0,
         status: inv.status || "Paid",
       }));
     setRecentInvoices(recent);
@@ -187,6 +180,42 @@ export function Dashboard() {
         color: low > 0 ? "text-amber-600" : "text-slate-400",
       },
     ]);
+    };
+
+    Promise.all([
+      fetchApi("/analytics/summary?period=today"),
+      fetchApi("/analytics/summary?period=all"),
+      fetchApi("/invoices?page=1&per_page=8"),
+      fetchApi("/products?per_page=100"),
+      fetchApi("/settings"),
+    ]).then(([today, all, invoicePage, productPage, settings]) => {
+      const products = productPage.items || [];
+      setShopData(settings.settings || {});
+      setRecentInvoices((invoicePage.items || []).map((inv: any) => ({
+        id: inv.id, invoiceNo: inv.invoice_no, customer: inv.customer_name || "Walk-In",
+        date: inv.invoice_date, amount: inv.total, status: inv.status,
+      })));
+      const low = products.filter((p: any) => (p.stock ?? 0) < 20).length;
+      setLowStockCount(low);
+      setStats([
+        { label: "Today's Sales", value: `₹${today.total_revenue.toLocaleString("en-IN")}`, sub: `${today.total_invoices} invoice${today.total_invoices !== 1 ? "s" : ""}`, icon: TrendingUp, color: "text-emerald-600" },
+        { label: "Total Revenue", value: `₹${all.total_revenue.toLocaleString("en-IN")}`, sub: `${all.total_invoices} invoices total`, icon: Receipt, color: "text-blue-600" },
+        { label: "Customers", value: String(all.customer_count), sub: "in database", icon: Users, color: "text-indigo-600" },
+        { label: "Low Stock", value: String(low), sub: low > 0 ? "items need attention" : "All stocked up", icon: AlertTriangle, color: low > 0 ? "text-amber-600" : "text-slate-400" },
+      ]);
+      setIsOffline(false);
+    }).catch(() => {
+      if (!useLegacyFallback) return;
+      try {
+        const invoices = JSON.parse(localStorage.getItem("invoices") || "[]");
+        const products = JSON.parse(localStorage.getItem("products") || "[]");
+        const customers = JSON.parse(localStorage.getItem("customers") || "[]");
+        const rawSettings = localStorage.getItem("shopmanager_settings") || localStorage.getItem("shopmanager_shop_data");
+        if (rawSettings) setShopData(JSON.parse(rawSettings));
+        applyData(invoices, products, customers);
+        setIsOffline(true);
+      } catch { setIsOffline(true); }
+    });
   }, []);
 
   const dateStr = now.toLocaleDateString("en-IN", {
@@ -251,6 +280,8 @@ export function Dashboard() {
           </motion.button>
         </div>
       </header>
+
+      {isOffline && <div className="px-6 py-2 text-xs font-semibold text-amber-700 bg-amber-50 border-b border-amber-200">Offline Mode – Showing Cached Data</div>}
 
       {showPower && <PowerDialog onClose={() => setShowPower(false)} />}
 

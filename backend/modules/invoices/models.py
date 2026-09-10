@@ -78,3 +78,20 @@ class InvoiceItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<InvoiceItem id={self.id} invoice_id={self.invoice_id}>"
+
+
+class InvoiceSequence(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """
+    Tracks sequential invoice numbers per prefix and year.
+
+    Table: invoice_sequence
+    """
+
+    __tablename__ = "invoice_sequence"
+
+    prefix: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    last_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    def __repr__(self) -> str:
+        return f"<InvoiceSequence prefix={self.prefix!r} year={self.year} last={self.last_number}>"
